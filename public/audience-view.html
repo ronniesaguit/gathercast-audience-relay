@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GatherCast Audience View</title>
+  <link rel="stylesheet" href="/audience-view.css">
+</head>
+<body>
+  <main class="audience-shell">
+    <header class="audience-header">
+      <div>
+        <div class="eyebrow">GatherCast Studio</div>
+        <h1>Live Class View</h1>
+      </div>
+      <span id="audienceStatus" class="audience-status">Waiting</span>
+    </header>
+
+    <section id="joinPanel" class="join-panel" hidden>
+      <label>
+        <span>Session link or code</span>
+        <input
+          id="sessionInput"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Paste the teacher's watch link"
+        >
+      </label>
+      <button id="joinButton" type="button">Join</button>
+    </section>
+
+    <section class="stage-shell">
+      <video
+        id="audienceVideo"
+        class="audience-video"
+        playsinline
+        controls
+      ></video>
+      <div id="audienceEmpty" class="audience-empty">
+        Waiting for the teacher to start the local audience broadcast.
+      </div>
+    </section>
+
+    <div class="audience-actions">
+      <button id="playButton" type="button" disabled>Play Live</button>
+      <span id="audienceMeta">Open the link from the teacher while on the same WiFi.</span>
+    </div>
+  </main>
+
+  <script type="module" src="/audience-view.js"></script>
+</body>
+</html>
