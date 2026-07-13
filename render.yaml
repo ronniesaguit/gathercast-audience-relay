@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: gathercast-audience-relay
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    healthCheckPath: /api/relay/health
+    autoDeployTrigger: commit
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GATHERCAST_RELAY_ALLOWED_ORIGIN
+        value: "*"
+      - key: GATHERCAST_RELAY_HOST_KEY
+        sync: false
