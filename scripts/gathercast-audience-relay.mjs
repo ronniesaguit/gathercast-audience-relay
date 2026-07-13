@@ -24,6 +24,11 @@ const RELAY_MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 const RELAY_MAX_VIEWERS = Number(
   process.env.GATHERCAST_RELAY_MAX_VIEWERS || 200
 );
+const RELAY_MAX_MESSAGES = Number(
+  process.env.GATHERCAST_RELAY_MAX_MESSAGES || 300
+);
+const RELAY_MAX_MESSAGE_NAME_CHARS = 60;
+const RELAY_MAX_MESSAGE_TEXT_CHARS = 500;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,6 +54,8 @@ const relayState = {
   lastChunkAt: 0,
   bytesReceived: 0,
   viewers: new Set(),
+  messages: [],
+  nextMessageId: 1,
 };
 
 function exitIfRelayIsUnsafe() {
@@ -250,6 +257,80 @@ function getAudienceStatusPayload(sessionId = '') {
   };
 }
 
+function normalizeAudienceMessageText(value, maxLength) {
+  return String(value || '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function createHttpError(message, statusCode = 400) {
+  return Object.assign(new Error(message), {
+    statusCode,
+  });
+}
+
+function appendAudienceMessage({
+  role = 'audience',
+  name = '',
+  text = '',
+} = {}) {
+  const safeRole =
+    role === 'teacher' ? 'teacher' : 'audience';
+  const safeName = normalizeAudienceMessageText(
+    name,
+    RELAY_MAX_MESSAGE_NAME_CHARS
+  ) || (safeRole === 'teacher' ? 'Teacher' : 'Audience');
+  const safeText = normalizeAudienceMessageText(
+    text,
+    RELAY_MAX_MESSAGE_TEXT_CHARS
+  );
+
+  if (!safeText) {
+    throw createHttpError('Message text is required.', 400);
+  }
+
+  const message = {
+    id: relayState.nextMessageId,
+    role: safeRole,
+    name: safeName,
+    text: safeText,
+    createdAt: Date.now(),
+  };
+
+  relayState.nextMessageId += 1;
+  relayState.messages.push(message);
+
+  if (relayState.messages.length > RELAY_MAX_MESSAGES) {
+    relayState.messages.splice(
+      0,
+      relayState.messages.length - RELAY_MAX_MESSAGES
+    );
+  }
+
+  return message;
+}
+
+function getAudienceMessagesPayload(sessionId = '', afterId = 0) {
+  const sessionMatches = hasActiveAudienceSession(sessionId);
+  const lastSeen = Number(afterId) || 0;
+  const messages = sessionMatches
+    ? relayState.messages.filter(
+        (message) => message.id > lastSeen
+      )
+    : [];
+
+  return {
+    active: sessionMatches,
+    messages,
+    latestMessageId: sessionMatches && relayState.messages.length
+      ? relayState.messages[relayState.messages.length - 1].id
+      : lastSeen,
+    relay: true,
+  };
+}
+
 function closeAudienceViewers() {
   for (const viewer of relayState.viewers) {
     try {
@@ -283,6 +364,8 @@ function startAudienceSession(req, {
   relayState.initChunk = null;
   relayState.lastChunkAt = 0;
   relayState.bytesReceived = 0;
+  relayState.messages = [];
+  relayState.nextMessageId = 1;
 
   return {
     sessionId: relayState.sessionId,
@@ -291,6 +374,58 @@ function startAudienceSession(req, {
     audienceUrl: getAudienceUrl(req, relayState.sessionId),
     relay: true,
   };
+}
+
+async function receiveAudienceMessage(req, res, requestUrl) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const message = appendAudienceMessage({
+    role: 'audience',
+    name: body.name,
+    text: body.text,
+  });
+
+  sendJson(res, 200, {
+    accepted: true,
+    message,
+    latestMessageId: message.id,
+    relay: true,
+  });
+}
+
+async function receiveTeacherAudienceMessage(req, res, requestUrl) {
+  requireHostKey(req);
+
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const message = appendAudienceMessage({
+    role: 'teacher',
+    name: 'Teacher',
+    text: body.text,
+  });
+
+  sendJson(res, 200, {
+    accepted: true,
+    message,
+    latestMessageId: message.id,
+    relay: true,
+  });
 }
 
 function stopAudienceSession(sessionId) {
@@ -545,6 +680,49 @@ async function handleRoute(req, res) {
         getAudienceSessionFromUrl(requestUrl)
       )
     );
+    return;
+  }
+
+  if (pathname === '/api/audience/messages') {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    sendJson(
+      res,
+      200,
+      getAudienceMessagesPayload(
+        getAudienceSessionFromUrl(requestUrl),
+        requestUrl.searchParams.get('after')
+      )
+    );
+    return;
+  }
+
+  if (pathname === '/api/audience/message') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveAudienceMessage(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/relay/message') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveTeacherAudienceMessage(req, res, requestUrl);
     return;
   }
 

@@ -46,6 +46,46 @@
       <button id="playButton" type="button" disabled>Play Live</button>
       <span id="audienceMeta">Open the link from the teacher while on the same WiFi.</span>
     </div>
+
+    <section class="audience-chat" aria-labelledby="audienceChatTitle">
+      <div class="audience-chat-header">
+        <div>
+          <div class="eyebrow">Audience Messages</div>
+          <h2 id="audienceChatTitle">Questions and replies</h2>
+        </div>
+        <span id="audienceChatStatus">Waiting</span>
+      </div>
+
+      <div
+        id="audienceMessageList"
+        class="audience-message-list"
+        aria-live="polite"
+      >
+        <p class="audience-message-empty">
+          Messages will appear here when the broadcast starts.
+        </p>
+      </div>
+
+      <form id="audienceMessageForm" class="audience-message-form">
+        <input
+          id="audienceNameInput"
+          type="text"
+          autocomplete="name"
+          maxlength="60"
+          placeholder="Your name"
+        >
+        <input
+          id="audienceMessageInput"
+          type="text"
+          autocomplete="off"
+          maxlength="500"
+          placeholder="Ask a question or send a comment"
+        >
+        <button id="audienceSendButton" type="submit" disabled>
+          Send
+        </button>
+      </form>
+    </section>
   </main>
 
   <script type="module" src="/audience-view.js"></script>
