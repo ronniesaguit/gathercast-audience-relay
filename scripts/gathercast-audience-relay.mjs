@@ -21,6 +21,7 @@ const RELAY_HOST_KEY = String(
 );
 const MAX_JSON_BYTES = 64 * 1024;
 const RELAY_MAX_CHUNK_BYTES = 8 * 1024 * 1024;
+const RELAY_MAX_FRAME_BYTES = 1536 * 1024;
 const RELAY_MAX_VIEWERS = Number(
   process.env.GATHERCAST_RELAY_MAX_VIEWERS || 200
 );
@@ -56,6 +57,9 @@ const relayState = {
   chunkSequence: 0,
   initChunk: null,
   lastChunkAt: 0,
+  frameSequence: 0,
+  latestFrame: null,
+  lastFrameAt: 0,
   bytesReceived: 0,
   viewers: new Set(),
   messages: [],
@@ -258,6 +262,8 @@ function getAudienceStatusPayload(sessionId = '') {
     mimeType: sessionMatches ? relayState.mimeType : 'video/webm',
     startedAt: sessionMatches ? relayState.startedAt : 0,
     lastChunkAt: sessionMatches ? relayState.lastChunkAt : 0,
+    lastFrameAt: sessionMatches ? relayState.lastFrameAt : 0,
+    frameSequence: sessionMatches ? relayState.frameSequence : 0,
     bytesReceived: sessionMatches ? relayState.bytesReceived : 0,
     viewerCount: sessionMatches ? relayState.viewers.size : 0,
     relay: true,
@@ -839,6 +845,21 @@ function closeAudienceViewers() {
   relayState.viewers.clear();
 }
 
+function normalizeAudienceFrameMimeType(value = '') {
+  const contentType = String(value || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+
+  return [
+    'image/webp',
+    'image/jpeg',
+    'image/png',
+  ].includes(contentType)
+    ? contentType
+    : '';
+}
+
 function startAudienceSession(req, {
   title = '',
   mimeType = '',
@@ -859,6 +880,9 @@ function startAudienceSession(req, {
   relayState.chunkSequence = 0;
   relayState.initChunk = null;
   relayState.lastChunkAt = 0;
+  relayState.frameSequence = 0;
+  relayState.latestFrame = null;
+  relayState.lastFrameAt = 0;
   relayState.bytesReceived = 0;
   relayState.messages = [];
   relayState.nextMessageId = 1;
@@ -934,6 +958,8 @@ function stopAudienceSession(sessionId) {
     relayState.endedAt = Date.now();
     closeAudienceViewers();
     resetAudienceInteractiveState();
+    relayState.latestFrame = null;
+    relayState.lastFrameAt = 0;
   }
 
   return {
@@ -941,6 +967,94 @@ function stopAudienceSession(sessionId) {
     phase: 'stopped',
     relay: true,
   };
+}
+
+async function receiveAudienceFrame(req, res, requestUrl) {
+  requireHostKey(req);
+
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'No active relay audience session is available.',
+    });
+    return;
+  }
+
+  const mimeType = normalizeAudienceFrameMimeType(
+    req.headers['content-type']
+  );
+
+  if (!mimeType) {
+    sendJson(res, 415, {
+      error: 'Audience frames must be image/webp, image/jpeg, or image/png.',
+    });
+    return;
+  }
+
+  const body = await readRequestBody(
+    req,
+    RELAY_MAX_FRAME_BYTES
+  );
+
+  if (body.length === 0) {
+    sendJson(res, 200, {
+      accepted: false,
+      sequence: relayState.frameSequence,
+      relay: true,
+    });
+    return;
+  }
+
+  relayState.frameSequence += 1;
+  relayState.lastFrameAt = Date.now();
+  relayState.latestFrame = {
+    sequence: relayState.frameSequence,
+    capturedAt: relayState.lastFrameAt,
+    mimeType,
+    body,
+  };
+
+  sendJson(res, 200, {
+    accepted: true,
+    sequence: relayState.frameSequence,
+    capturedAt: relayState.lastFrameAt,
+    relay: true,
+  });
+}
+
+function serveAudienceFrame(req, res, requestUrl) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 404, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const frame = relayState.latestFrame;
+
+  if (!frame) {
+    res.writeHead(204, {
+      ...createCorsHeaders(),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end();
+    return;
+  }
+
+  res.writeHead(200, {
+    ...createCorsHeaders(),
+    'Content-Type': frame.mimeType,
+    'Content-Length': frame.body.length,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-GatherCast-Frame-Sequence': String(frame.sequence),
+    'X-GatherCast-Frame-Captured-At': String(frame.capturedAt),
+  });
+  res.end(frame.body);
 }
 
 function writeAudienceChunkToViewers(buffer) {
@@ -1144,6 +1258,26 @@ async function handleRoute(req, res) {
     }
 
     await receiveAudienceChunk(req, res, requestUrl);
+    return;
+  }
+
+  if (
+    pathname === '/api/relay/frame' ||
+    pathname === '/api/audience/frame'
+  ) {
+    if (req.method === 'POST') {
+      await receiveAudienceFrame(req, res, requestUrl);
+      return;
+    }
+
+    if (req.method === 'GET') {
+      serveAudienceFrame(req, res, requestUrl);
+      return;
+    }
+
+    sendJson(res, 405, {
+      error: 'Method not allowed',
+    });
     return;
   }
 

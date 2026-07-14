@@ -4,6 +4,7 @@ const ui = {
   sessionInput: document.getElementById("sessionInput"),
   joinButton: document.getElementById("joinButton"),
   video: document.getElementById("audienceVideo"),
+  frame: document.getElementById("audienceFrame"),
   empty: document.getElementById("audienceEmpty"),
   playButton: document.getElementById("playButton"),
   meta: document.getElementById("audienceMeta"),
@@ -30,6 +31,10 @@ const state = {
   lastVideoTime: 0,
   lastStreamReconnectAt: 0,
   streamReconnectCount: 0,
+  frameTimer: 0,
+  frameObjectUrl: "",
+  lastFrameSequence: 0,
+  lastFrameAt: 0,
   statusTimer: 0,
   messagesTimer: 0,
   messages: [],
@@ -117,6 +122,7 @@ function applySession(sessionId) {
   stopInteractiveGuest({
     notify: false,
   });
+  clearAudienceFrame();
   state.sessionId = String(sessionId || "").trim();
   state.streamUrl = "";
   state.streamConnected = false;
@@ -125,6 +131,8 @@ function applySession(sessionId) {
   state.lastVideoTime = 0;
   state.lastStreamReconnectAt = 0;
   state.streamReconnectCount = 0;
+  state.lastFrameSequence = 0;
+  state.lastFrameAt = 0;
   state.lastStartedAt = 0;
   ui.video.removeAttribute("src");
   ui.video.load();
@@ -270,6 +278,103 @@ function buildAudienceUrl(pathname) {
   url.searchParams.set("session", state.sessionId);
   url.searchParams.set("t", String(Date.now()));
   return url;
+}
+
+function clearAudienceFrame() {
+  if (state.frameObjectUrl) {
+    URL.revokeObjectURL(state.frameObjectUrl);
+  }
+
+  state.frameObjectUrl = "";
+  state.lastFrameSequence = 0;
+  state.lastFrameAt = 0;
+
+  if (ui.frame) {
+    ui.frame.removeAttribute("src");
+    ui.frame.hidden = true;
+  }
+}
+
+async function refreshAudienceFrame() {
+  if (!state.sessionId) {
+    clearAudienceFrame();
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      buildAudienceUrl("/api/audience/frame"),
+      {
+        cache: "no-store",
+      }
+    );
+
+    if (response.status === 204) {
+      return;
+    }
+
+    if (!response.ok) {
+      return;
+    }
+
+    const sequence = Number(
+      response.headers.get(
+        "X-GatherCast-Frame-Sequence"
+      )
+    ) || 0;
+
+    if (
+      sequence &&
+      sequence === state.lastFrameSequence
+    ) {
+      return;
+    }
+
+    const blob = await response.blob();
+
+    if (!blob || blob.size <= 0) {
+      return;
+    }
+
+    const objectUrl =
+      URL.createObjectURL(blob);
+    const previousUrl =
+      state.frameObjectUrl;
+
+    state.frameObjectUrl = objectUrl;
+    state.lastFrameSequence = sequence;
+    state.lastFrameAt =
+      Number(
+        response.headers.get(
+          "X-GatherCast-Frame-Captured-At"
+        )
+      ) || Date.now();
+
+    if (ui.frame) {
+      ui.frame.src = objectUrl;
+      ui.frame.hidden = false;
+      ui.empty.classList.add("hidden");
+    }
+
+    if (previousUrl) {
+      window.setTimeout(
+        () => URL.revokeObjectURL(previousUrl),
+        1000
+      );
+    }
+  } catch {
+    // The video stream remains available if frame polling misses a beat.
+  }
+}
+
+function startFramePolling() {
+  window.clearInterval(state.frameTimer);
+  refreshAudienceFrame();
+  state.frameTimer =
+    window.setInterval(
+      refreshAudienceFrame,
+      700
+    );
 }
 
 function getAudienceVideoBufferedEnd() {
@@ -762,6 +867,7 @@ async function refreshStatus() {
       state.lastStartedAt = 0;
       state.lastChunkAt = 0;
       state.lastVideoProgressAt = 0;
+      clearAudienceFrame();
       ui.video.removeAttribute("src");
       ui.video.load();
       setMessage("Waiting for the teacher to start the audience broadcast.");
@@ -820,6 +926,7 @@ ui.joinButton.addEventListener("click", () => {
   applySession(sessionId);
   startStatusPolling();
   startMessagesPolling();
+  startFramePolling();
   startInteractivePolling();
 });
 
@@ -1016,6 +1123,8 @@ ui.nameInput.value =
 state.participantId = getOrCreateParticipantId();
 
 window.addEventListener("beforeunload", () => {
+  window.clearInterval(state.frameTimer);
+  clearAudienceFrame();
   stopInteractiveGuest({
     notify: true,
   });
@@ -1024,4 +1133,5 @@ window.addEventListener("beforeunload", () => {
 applySession(getSessionFromUrl());
 startStatusPolling();
 startMessagesPolling();
+startFramePolling();
 startInteractivePolling();
