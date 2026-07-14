@@ -13,6 +13,10 @@ const ui = {
   nameInput: document.getElementById("audienceNameInput"),
   messageInput: document.getElementById("audienceMessageInput"),
   sendButton: document.getElementById("audienceSendButton"),
+  interactiveStatus: document.getElementById("audienceInteractiveStatus"),
+  raiseHandButton: document.getElementById("audienceRaiseHandButton"),
+  leaveGuestButton: document.getElementById("audienceLeaveGuestButton"),
+  guestPreview: document.getElementById("audienceGuestPreview"),
 };
 
 const state = {
@@ -24,11 +28,45 @@ const state = {
   messagesTimer: 0,
   messages: [],
   latestMessageId: 0,
+  participantId: "",
+  interactiveTimer: 0,
+  interactiveSignalId: 0,
+  interactiveParticipant: null,
+  interactivePeer: null,
+  interactiveStream: null,
+  interactiveStarting: false,
+  interactiveIceServers: [],
 };
 
 function getSessionFromUrl() {
   const params = new URLSearchParams(window.location.search);
   return String(params.get("session") || "").trim();
+}
+
+function getOrCreateParticipantId() {
+  const storageKey = "gathercastAudienceParticipantId";
+  const existing =
+    window.localStorage?.getItem(storageKey) || "";
+
+  if (/^[a-z0-9_-]{8,80}$/i.test(existing)) {
+    return existing;
+  }
+
+  const generated =
+    window.crypto?.randomUUID?.().replace(/-/g, "") ||
+    `aud${Date.now().toString(36)}${Math.random()
+      .toString(36)
+      .slice(2, 12)}`;
+  const participantId = generated
+    .replace(/[^a-z0-9_-]/gi, "")
+    .slice(0, 80);
+
+  window.localStorage?.setItem(
+    storageKey,
+    participantId
+  );
+
+  return participantId;
 }
 
 function extractSession(value) {
@@ -59,11 +97,20 @@ function setChatStatus(text) {
   ui.chatStatus.textContent = text;
 }
 
+function setInteractiveStatus(text) {
+  if (ui.interactiveStatus) {
+    ui.interactiveStatus.textContent = text;
+  }
+}
+
 function updateJoinPanel() {
   ui.joinPanel.hidden = Boolean(state.sessionId);
 }
 
 function applySession(sessionId) {
+  stopInteractiveGuest({
+    notify: false,
+  });
   state.sessionId = String(sessionId || "").trim();
   state.streamUrl = "";
   state.streamConnected = false;
@@ -72,6 +119,9 @@ function applySession(sessionId) {
   ui.video.load();
   state.messages = [];
   state.latestMessageId = 0;
+  state.interactiveParticipant = null;
+  state.interactiveSignalId = 0;
+  state.interactiveIceServers = [];
   renderMessages();
   updateJoinPanel();
 
@@ -211,6 +261,344 @@ function buildAudienceUrl(pathname) {
   return url;
 }
 
+function getAudienceDisplayName() {
+  const name = ui.nameInput?.value?.trim() || "";
+
+  if (name) {
+    return name;
+  }
+
+  return "Audience";
+}
+
+async function postInteractive(pathname, body = {}) {
+  const response = await fetch(
+    buildAudienceUrl(pathname),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        participantId: state.participantId,
+        ...body,
+      }),
+    }
+  );
+
+  const payload = await response
+    .json()
+    .catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || "Interaction request failed"
+    );
+  }
+
+  return payload;
+}
+
+async function sendInteractiveSignal(type, payload = {}) {
+  if (!state.sessionId || !state.participantId) {
+    return;
+  }
+
+  await postInteractive(
+    "/api/audience/interactive/signal",
+    {
+      type,
+      payload,
+    }
+  );
+}
+
+function stopInteractiveGuest({ notify = true } = {}) {
+  const participantId = state.participantId;
+  const sessionId = state.sessionId;
+
+  if (notify && participantId && sessionId) {
+    const body = JSON.stringify({
+      participantId,
+    });
+    const url = buildAudienceUrl(
+      "/api/audience/interactive/leave"
+    );
+
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(
+        url.toString(),
+        new Blob([body], {
+          type: "application/json",
+        })
+      );
+    } else {
+      fetch(url.toString(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }
+
+  if (state.interactivePeer) {
+    try {
+      state.interactivePeer.close();
+    } catch {
+      // Already closed.
+    }
+  }
+
+  if (state.interactiveStream) {
+    for (const track of state.interactiveStream.getTracks()) {
+      track.stop();
+    }
+  }
+
+  state.interactivePeer = null;
+  state.interactiveStream = null;
+  state.interactiveStarting = false;
+
+  if (ui.guestPreview) {
+    ui.guestPreview.srcObject = null;
+    ui.guestPreview.hidden = true;
+  }
+}
+
+async function startInteractiveGuest() {
+  if (
+    state.interactivePeer ||
+    state.interactiveStarting ||
+    !state.sessionId
+  ) {
+    return;
+  }
+
+  state.interactiveStarting = true;
+  setInteractiveStatus("Opening camera...");
+
+  try {
+    const stream =
+      await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true,
+      });
+
+    const peer = new RTCPeerConnection({
+      iceServers: state.interactiveIceServers || [],
+    });
+
+    state.interactiveStream = stream;
+    state.interactivePeer = peer;
+
+    if (ui.guestPreview) {
+      ui.guestPreview.srcObject = stream;
+      ui.guestPreview.hidden = false;
+      ui.guestPreview.play().catch(() => {});
+    }
+
+    for (const track of stream.getTracks()) {
+      peer.addTrack(track, stream);
+    }
+
+    peer.addEventListener("icecandidate", (event) => {
+      if (event.candidate) {
+        sendInteractiveSignal("candidate", {
+          candidate: event.candidate.toJSON(),
+        }).catch(() => {});
+      }
+    });
+
+    peer.addEventListener(
+      "connectionstatechange",
+      () => {
+        if (
+          [
+            "failed",
+            "disconnected",
+            "closed",
+          ].includes(peer.connectionState)
+        ) {
+          setInteractiveStatus("Disconnected");
+        } else if (peer.connectionState === "connected") {
+          setInteractiveStatus("Connected");
+        }
+      }
+    );
+
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+    await sendInteractiveSignal("offer", {
+      description: peer.localDescription,
+    });
+
+    setInteractiveStatus("Connecting");
+  } catch (error) {
+    stopInteractiveGuest({
+      notify: false,
+    });
+    setInteractiveStatus(
+      error?.name === "NotAllowedError"
+        ? "Camera blocked"
+        : "Could not join"
+    );
+  } finally {
+    state.interactiveStarting = false;
+  }
+}
+
+async function handleInteractiveSignals(signals = []) {
+  if (!Array.isArray(signals) || !signals.length) {
+    return;
+  }
+
+  for (const signal of signals) {
+    state.interactiveSignalId = Math.max(
+      state.interactiveSignalId,
+      Number(signal.id) || 0
+    );
+
+    if (!state.interactivePeer) {
+      continue;
+    }
+
+    if (signal.type === "answer") {
+      const description =
+        signal.payload?.description || signal.payload;
+
+      if (description?.type && description?.sdp) {
+        await state.interactivePeer.setRemoteDescription(
+          new RTCSessionDescription(description)
+        );
+      }
+    } else if (signal.type === "candidate") {
+      const candidate =
+        signal.payload?.candidate || signal.payload;
+
+      if (candidate) {
+        await state.interactivePeer.addIceCandidate(
+          new RTCIceCandidate(candidate)
+        );
+      }
+    } else if (signal.type === "leave") {
+      stopInteractiveGuest({
+        notify: false,
+      });
+      setInteractiveStatus("Removed");
+    }
+  }
+}
+
+async function refreshInteractive() {
+  if (!state.sessionId || !state.participantId) {
+    setInteractiveStatus("Waiting");
+    if (ui.raiseHandButton) {
+      ui.raiseHandButton.disabled = true;
+    }
+    if (ui.leaveGuestButton) {
+      ui.leaveGuestButton.disabled = true;
+    }
+    return;
+  }
+
+  try {
+    const url = buildAudienceUrl("/api/audience/interactive");
+    url.searchParams.set(
+      "participant",
+      state.participantId
+    );
+    url.searchParams.set(
+      "after",
+      String(state.interactiveSignalId || 0)
+    );
+
+    const response = await fetch(url.toString(), {
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Interaction unavailable");
+    }
+
+    const payload = await response.json();
+    state.interactiveIceServers =
+      Array.isArray(payload.iceServers)
+        ? payload.iceServers
+        : [];
+    state.interactiveParticipant =
+      payload.participant || null;
+    const participant =
+      state.interactiveParticipant;
+    const status = participant?.status || "";
+
+    if (ui.raiseHandButton) {
+      ui.raiseHandButton.disabled =
+        !payload.active ||
+        [
+          "pending",
+          "approved",
+        ].includes(status);
+    }
+
+    if (ui.leaveGuestButton) {
+      ui.leaveGuestButton.disabled =
+        ![
+          "pending",
+          "approved",
+        ].includes(status);
+    }
+
+    if (!payload.active) {
+      stopInteractiveGuest({
+        notify: false,
+      });
+      setInteractiveStatus("Waiting");
+    } else if (status === "pending") {
+      setInteractiveStatus("Hand raised");
+    } else if (status === "approved") {
+      setInteractiveStatus(
+        state.interactivePeer
+          ? "Connecting"
+          : "Approved"
+      );
+      await startInteractiveGuest();
+      await handleInteractiveSignals(payload.signals);
+    } else if (status === "rejected") {
+      stopInteractiveGuest({
+        notify: false,
+      });
+      setInteractiveStatus("Not chosen");
+    } else if (
+      status === "removed" ||
+      status === "left"
+    ) {
+      stopInteractiveGuest({
+        notify: false,
+      });
+      setInteractiveStatus("Left");
+    } else {
+      setInteractiveStatus("Ready");
+    }
+  } catch {
+    setInteractiveStatus("Offline");
+    if (ui.raiseHandButton) {
+      ui.raiseHandButton.disabled = true;
+    }
+  }
+}
+
+function startInteractivePolling() {
+  window.clearInterval(state.interactiveTimer);
+  refreshInteractive();
+  state.interactiveTimer = window.setInterval(
+    refreshInteractive,
+    1600
+  );
+}
+
 function connectStream() {
   if (!state.sessionId) {
     return;
@@ -304,6 +692,7 @@ ui.joinButton.addEventListener("click", () => {
   applySession(sessionId);
   startStatusPolling();
   startMessagesPolling();
+  startInteractivePolling();
 });
 
 ui.sessionInput.addEventListener("keydown", (event) => {
@@ -320,6 +709,64 @@ ui.playButton.addEventListener("click", () => {
   ui.video.play().catch(() => {
     setMessage("Press play in the video controls to start audio.");
   });
+});
+
+ui.raiseHandButton?.addEventListener("click", async () => {
+  if (!state.sessionId) {
+    setInteractiveStatus("Need link");
+    return;
+  }
+
+  try {
+    const name = getAudienceDisplayName();
+
+    if (name) {
+      window.localStorage?.setItem(
+        "gathercastAudienceName",
+        name
+      );
+    }
+
+    if (ui.raiseHandButton) {
+      ui.raiseHandButton.disabled = true;
+    }
+
+    setInteractiveStatus("Raising hand...");
+    await postInteractive(
+      "/api/audience/interactive/raise-hand",
+      {
+        name,
+      }
+    );
+    setInteractiveStatus("Hand raised");
+    window.setTimeout(refreshInteractive, 300);
+  } catch (error) {
+    setInteractiveStatus(
+      error?.message || "Could not raise hand"
+    );
+    if (ui.raiseHandButton) {
+      ui.raiseHandButton.disabled = false;
+    }
+  }
+});
+
+ui.leaveGuestButton?.addEventListener("click", async () => {
+  try {
+    await postInteractive(
+      "/api/audience/interactive/leave"
+    );
+  } catch {
+    // The local camera still needs to close even if the network is gone.
+  }
+
+  stopInteractiveGuest({
+    notify: false,
+  });
+  state.interactiveParticipant = {
+    status: "left",
+  };
+  setInteractiveStatus("Left");
+  window.setTimeout(refreshInteractive, 300);
 });
 
 ui.messageForm.addEventListener("submit", async (event) => {
@@ -397,7 +844,15 @@ ui.video.addEventListener("error", () => {
 
 ui.nameInput.value =
   window.localStorage?.getItem("gathercastAudienceName") || "";
+state.participantId = getOrCreateParticipantId();
+
+window.addEventListener("beforeunload", () => {
+  stopInteractiveGuest({
+    notify: true,
+  });
+});
 
 applySession(getSessionFromUrl());
 startStatusPolling();
 startMessagesPolling();
+startInteractivePolling();

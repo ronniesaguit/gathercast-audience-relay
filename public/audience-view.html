@@ -47,6 +47,45 @@
       <span id="audienceMeta">Open the watch link from the teacher.</span>
     </div>
 
+    <section
+      class="audience-interactive"
+      aria-labelledby="audienceInteractiveTitle"
+    >
+      <div class="audience-interactive-header">
+        <div>
+          <div class="eyebrow">Live Interaction</div>
+          <h2 id="audienceInteractiveTitle">Talk with the teacher</h2>
+        </div>
+        <span id="audienceInteractiveStatus">Waiting</span>
+      </div>
+
+      <div class="audience-interactive-actions">
+        <button
+          id="audienceRaiseHandButton"
+          type="button"
+          disabled
+        >
+          Raise Hand
+        </button>
+        <button
+          id="audienceLeaveGuestButton"
+          type="button"
+          disabled
+        >
+          Leave
+        </button>
+      </div>
+
+      <video
+        id="audienceGuestPreview"
+        class="audience-guest-preview"
+        autoplay
+        muted
+        playsinline
+        hidden
+      ></video>
+    </section>
+
     <section class="audience-chat" aria-labelledby="audienceChatTitle">
       <div class="audience-chat-header">
         <div>

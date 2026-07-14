@@ -29,6 +29,10 @@ const RELAY_MAX_MESSAGES = Number(
 );
 const RELAY_MAX_MESSAGE_NAME_CHARS = 60;
 const RELAY_MAX_MESSAGE_TEXT_CHARS = 500;
+const RELAY_MAX_INTERACTIVE_GUESTS = 4;
+const RELAY_MAX_INTERACTIVE_REQUESTS = 80;
+const RELAY_MAX_INTERACTIVE_SIGNALS = 400;
+const RELAY_MAX_INTERACTIVE_SIGNAL_CHARS = 20000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,6 +60,9 @@ const relayState = {
   viewers: new Set(),
   messages: [],
   nextMessageId: 1,
+  interactiveRequests: [],
+  interactiveSignals: [],
+  nextInteractiveSignalId: 1,
 };
 
 function exitIfRelayIsUnsafe() {
@@ -331,6 +338,495 @@ function getAudienceMessagesPayload(sessionId = '', afterId = 0) {
   };
 }
 
+function resetAudienceInteractiveState() {
+  relayState.interactiveRequests = [];
+  relayState.interactiveSignals = [];
+  relayState.nextInteractiveSignalId = 1;
+}
+
+function normalizeAudienceParticipantId(value) {
+  const raw = String(value || '')
+    .trim()
+    .slice(0, 80);
+
+  if (!/^[a-z0-9_-]{8,80}$/i.test(raw)) {
+    throw createHttpError('A valid audience participant ID is required.', 400);
+  }
+
+  return raw;
+}
+
+function normalizeAudienceInteractiveName(value) {
+  return (
+    normalizeAudienceMessageText(
+      value,
+      RELAY_MAX_MESSAGE_NAME_CHARS
+    ) || 'Audience'
+  );
+}
+
+function normalizeAudienceInteractiveSignalType(value) {
+  const type = String(value || '')
+    .trim()
+    .toLowerCase();
+
+  if (
+    ![
+      'offer',
+      'answer',
+      'candidate',
+      'leave',
+    ].includes(type)
+  ) {
+    throw createHttpError('Unsupported interactive signal type.', 400);
+  }
+
+  return type;
+}
+
+function normalizeAudienceInteractivePayload(value) {
+  if (value === undefined || value === null) {
+    return {};
+  }
+
+  const encoded = JSON.stringify(value);
+
+  if (
+    !encoded ||
+    encoded.length > RELAY_MAX_INTERACTIVE_SIGNAL_CHARS
+  ) {
+    throw createHttpError('Interactive signal payload is too large.', 413);
+  }
+
+  return JSON.parse(encoded);
+}
+
+function getAudienceInteractiveRequest(participantId) {
+  return relayState.interactiveRequests.find(
+    (request) => request.participantId === participantId
+  ) || null;
+}
+
+function getApprovedAudienceInteractiveGuests() {
+  return relayState.interactiveRequests.filter(
+    (request) => request.status === 'approved'
+  );
+}
+
+function trimAudienceInteractiveRequests() {
+  if (
+    relayState.interactiveRequests.length <=
+    RELAY_MAX_INTERACTIVE_REQUESTS
+  ) {
+    return;
+  }
+
+  const pinned = relayState.interactiveRequests.filter(
+    (request) => request.status === 'approved'
+  );
+  const recent = relayState.interactiveRequests
+    .filter((request) => request.status !== 'approved')
+    .slice(
+      -Math.max(
+        RELAY_MAX_INTERACTIVE_REQUESTS - pinned.length,
+        0
+      )
+    );
+
+  relayState.interactiveRequests = [
+    ...pinned,
+    ...recent,
+  ].slice(-RELAY_MAX_INTERACTIVE_REQUESTS);
+}
+
+function appendAudienceInteractiveSignal({
+  participantId = '',
+  from = '',
+  target = '',
+  type = '',
+  payload = {},
+} = {}) {
+  const signal = {
+    id: relayState.nextInteractiveSignalId,
+    participantId: normalizeAudienceParticipantId(participantId),
+    from: from === 'teacher' ? 'teacher' : 'audience',
+    target: target === 'teacher' ? 'teacher' : 'audience',
+    type: normalizeAudienceInteractiveSignalType(type),
+    payload: normalizeAudienceInteractivePayload(payload),
+    createdAt: Date.now(),
+  };
+
+  relayState.nextInteractiveSignalId += 1;
+  relayState.interactiveSignals.push(signal);
+
+  if (
+    relayState.interactiveSignals.length >
+    RELAY_MAX_INTERACTIVE_SIGNALS
+  ) {
+    relayState.interactiveSignals.splice(
+      0,
+      relayState.interactiveSignals.length -
+        RELAY_MAX_INTERACTIVE_SIGNALS
+    );
+  }
+
+  return signal;
+}
+
+function getAudienceInteractiveSignals({
+  participantId = '',
+  target = '',
+  afterId = 0,
+} = {}) {
+  const lastSeen = Number(afterId) || 0;
+
+  return relayState.interactiveSignals.filter((signal) => {
+    if (signal.id <= lastSeen) {
+      return false;
+    }
+
+    if (participantId && signal.participantId !== participantId) {
+      return false;
+    }
+
+    return !target || signal.target === target;
+  });
+}
+
+function getAudienceInteractiveIceServers() {
+  const configured = String(
+    process.env.GATHERCAST_WEBRTC_ICE_SERVERS || ''
+  ).trim();
+
+  if (configured) {
+    try {
+      const parsed = JSON.parse(configured);
+
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((item) => item && typeof item === 'object')
+          .slice(0, 8);
+      }
+    } catch {
+      const urls = configured
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 8);
+
+      if (urls.length) {
+        return urls.map((url) => ({ urls: url }));
+      }
+    }
+  }
+
+  return [
+    {
+      urls: 'stun:stun.l.google.com:19302',
+    },
+  ];
+}
+
+function getAudienceInteractivePublicPayload(
+  sessionId = '',
+  participantId = '',
+  afterId = 0
+) {
+  const active = hasActiveAudienceSession(sessionId);
+  const safeParticipantId = participantId
+    ? normalizeAudienceParticipantId(participantId)
+    : '';
+  const participant =
+    active && safeParticipantId
+      ? getAudienceInteractiveRequest(safeParticipantId)
+      : null;
+  const signals =
+    active && participant?.status === 'approved'
+      ? getAudienceInteractiveSignals({
+          participantId: safeParticipantId,
+          target: 'audience',
+          afterId,
+        })
+      : [];
+
+  return {
+    active,
+    participant,
+    signals,
+    latestSignalId: signals.length
+      ? signals[signals.length - 1].id
+      : Number(afterId) || 0,
+    maxGuests: RELAY_MAX_INTERACTIVE_GUESTS,
+    iceServers: getAudienceInteractiveIceServers(),
+    relay: true,
+  };
+}
+
+function getAudienceInteractiveTeacherPayload(
+  sessionId = '',
+  afterId = 0
+) {
+  const active = hasActiveAudienceSession(sessionId);
+  const signals = active
+    ? getAudienceInteractiveSignals({
+        target: 'teacher',
+        afterId,
+      })
+    : [];
+
+  return {
+    active,
+    requests: active
+      ? relayState.interactiveRequests
+      : [],
+    approvedGuests: active
+      ? getApprovedAudienceInteractiveGuests()
+      : [],
+    signals,
+    latestSignalId: signals.length
+      ? signals[signals.length - 1].id
+      : Number(afterId) || 0,
+    maxGuests: RELAY_MAX_INTERACTIVE_GUESTS,
+    iceServers: getAudienceInteractiveIceServers(),
+    relay: true,
+  };
+}
+
+async function receiveAudienceInteractiveRaiseHand(
+  req,
+  res,
+  requestUrl
+) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const participantId = normalizeAudienceParticipantId(
+    body.participantId
+  );
+  const now = Date.now();
+  let request =
+    getAudienceInteractiveRequest(participantId);
+
+  if (request) {
+    request.name = normalizeAudienceInteractiveName(body.name);
+    request.status =
+      request.status === 'approved' ? 'approved' : 'pending';
+    request.updatedAt = now;
+  } else {
+    request = {
+      participantId,
+      name: normalizeAudienceInteractiveName(body.name),
+      status: 'pending',
+      requestedAt: now,
+      updatedAt: now,
+    };
+    relayState.interactiveRequests.push(request);
+  }
+
+  trimAudienceInteractiveRequests();
+
+  sendJson(res, 200, {
+    accepted: true,
+    participant: request,
+    maxGuests: RELAY_MAX_INTERACTIVE_GUESTS,
+    relay: true,
+  });
+}
+
+async function receiveAudienceInteractiveSignal(
+  req,
+  res,
+  requestUrl
+) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const participantId = normalizeAudienceParticipantId(
+    body.participantId
+  );
+  const request = getAudienceInteractiveRequest(participantId);
+  const type = normalizeAudienceInteractiveSignalType(body.type);
+
+  if (type !== 'leave' && request?.status !== 'approved') {
+    throw createHttpError('The teacher has not approved this guest.', 403);
+  }
+
+  const signal = appendAudienceInteractiveSignal({
+    participantId,
+    from: 'audience',
+    target: 'teacher',
+    type,
+    payload: body.payload,
+  });
+
+  sendJson(res, 200, {
+    accepted: true,
+    signalId: signal.id,
+    relay: true,
+  });
+}
+
+async function receiveAudienceInteractiveLeave(
+  req,
+  res,
+  requestUrl
+) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 200, {
+      accepted: true,
+      relay: true,
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const participantId = normalizeAudienceParticipantId(
+    body.participantId
+  );
+  const request = getAudienceInteractiveRequest(participantId);
+
+  if (request) {
+    request.status = 'left';
+    request.updatedAt = Date.now();
+  }
+
+  appendAudienceInteractiveSignal({
+    participantId,
+    from: 'audience',
+    target: 'teacher',
+    type: 'leave',
+    payload: {},
+  });
+
+  sendJson(res, 200, {
+    accepted: true,
+    relay: true,
+  });
+}
+
+async function receiveTeacherAudienceInteractiveAction(
+  req,
+  res,
+  requestUrl
+) {
+  requireHostKey(req);
+
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const participantId = normalizeAudienceParticipantId(
+    body.participantId
+  );
+  const action = String(body.action || '')
+    .trim()
+    .toLowerCase();
+  const request = getAudienceInteractiveRequest(participantId);
+
+  if (!request) {
+    throw createHttpError('Audience guest request was not found.', 404);
+  }
+
+  if (action === 'approve') {
+    const approvedCount =
+      getApprovedAudienceInteractiveGuests().filter(
+        (guest) => guest.participantId !== participantId
+      ).length;
+
+    if (approvedCount >= RELAY_MAX_INTERACTIVE_GUESTS) {
+      throw createHttpError('The interactive guest panel is full.', 409);
+    }
+
+    request.status = 'approved';
+    request.approvedAt = Date.now();
+  } else if (action === 'reject') {
+    request.status = 'rejected';
+  } else if (action === 'remove') {
+    request.status = 'removed';
+    appendAudienceInteractiveSignal({
+      participantId,
+      from: 'teacher',
+      target: 'audience',
+      type: 'leave',
+      payload: {},
+    });
+  } else {
+    throw createHttpError('Unsupported interactive guest action.', 400);
+  }
+
+  request.updatedAt = Date.now();
+
+  sendJson(res, 200, {
+    accepted: true,
+    participant: request,
+    maxGuests: RELAY_MAX_INTERACTIVE_GUESTS,
+    relay: true,
+  });
+}
+
+async function receiveTeacherAudienceInteractiveSignal(
+  req,
+  res,
+  requestUrl
+) {
+  requireHostKey(req);
+
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const participantId = normalizeAudienceParticipantId(
+    body.participantId
+  );
+  const request = getAudienceInteractiveRequest(participantId);
+
+  if (request?.status !== 'approved') {
+    throw createHttpError('The audience guest is not approved.', 403);
+  }
+
+  const signal = appendAudienceInteractiveSignal({
+    participantId,
+    from: 'teacher',
+    target: 'audience',
+    type: body.type,
+    payload: body.payload,
+  });
+
+  sendJson(res, 200, {
+    accepted: true,
+    signalId: signal.id,
+    relay: true,
+  });
+}
+
 function closeAudienceViewers() {
   for (const viewer of relayState.viewers) {
     try {
@@ -366,6 +862,7 @@ function startAudienceSession(req, {
   relayState.bytesReceived = 0;
   relayState.messages = [];
   relayState.nextMessageId = 1;
+  resetAudienceInteractiveState();
 
   return {
     sessionId: relayState.sessionId,
@@ -436,6 +933,7 @@ function stopAudienceSession(sessionId) {
     relayState.active = false;
     relayState.endedAt = Date.now();
     closeAudienceViewers();
+    resetAudienceInteractiveState();
   }
 
   return {
@@ -702,6 +1200,47 @@ async function handleRoute(req, res) {
     return;
   }
 
+  if (pathname === '/api/audience/interactive') {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    sendJson(
+      res,
+      200,
+      getAudienceInteractivePublicPayload(
+        getAudienceSessionFromUrl(requestUrl),
+        requestUrl.searchParams.get('participant'),
+        requestUrl.searchParams.get('after')
+      )
+    );
+    return;
+  }
+
+  if (pathname === '/api/relay/interactive/teacher') {
+    requireHostKey(req);
+
+    if (req.method !== 'GET') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    sendJson(
+      res,
+      200,
+      getAudienceInteractiveTeacherPayload(
+        getAudienceSessionFromUrl(requestUrl),
+        requestUrl.searchParams.get('after')
+      )
+    );
+    return;
+  }
+
   if (pathname === '/api/audience/message') {
     if (req.method !== 'POST') {
       sendJson(res, 405, {
@@ -714,6 +1253,42 @@ async function handleRoute(req, res) {
     return;
   }
 
+  if (pathname === '/api/audience/interactive/raise-hand') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveAudienceInteractiveRaiseHand(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/audience/interactive/signal') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveAudienceInteractiveSignal(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/audience/interactive/leave') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveAudienceInteractiveLeave(req, res, requestUrl);
+    return;
+  }
+
   if (pathname === '/api/relay/message') {
     if (req.method !== 'POST') {
       sendJson(res, 405, {
@@ -723,6 +1298,30 @@ async function handleRoute(req, res) {
     }
 
     await receiveTeacherAudienceMessage(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/relay/interactive/action') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveTeacherAudienceInteractiveAction(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/relay/interactive/signal') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveTeacherAudienceInteractiveSignal(req, res, requestUrl);
     return;
   }
 
