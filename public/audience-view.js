@@ -23,7 +23,13 @@ const state = {
   sessionId: "",
   streamUrl: "",
   streamConnected: false,
+  wantsPlayback: false,
   lastStartedAt: 0,
+  lastChunkAt: 0,
+  lastVideoProgressAt: 0,
+  lastVideoTime: 0,
+  lastStreamReconnectAt: 0,
+  streamReconnectCount: 0,
   statusTimer: 0,
   messagesTimer: 0,
   messages: [],
@@ -114,6 +120,11 @@ function applySession(sessionId) {
   state.sessionId = String(sessionId || "").trim();
   state.streamUrl = "";
   state.streamConnected = false;
+  state.lastChunkAt = 0;
+  state.lastVideoProgressAt = 0;
+  state.lastVideoTime = 0;
+  state.lastStreamReconnectAt = 0;
+  state.streamReconnectCount = 0;
   state.lastStartedAt = 0;
   ui.video.removeAttribute("src");
   ui.video.load();
@@ -259,6 +270,95 @@ function buildAudienceUrl(pathname) {
   url.searchParams.set("session", state.sessionId);
   url.searchParams.set("t", String(Date.now()));
   return url;
+}
+
+function getAudienceVideoBufferedEnd() {
+  const ranges = ui.video.buffered;
+
+  if (!ranges || ranges.length === 0) {
+    return 0;
+  }
+
+  return ranges.end(ranges.length - 1);
+}
+
+function seekAudienceVideoToLiveEdge() {
+  if (!state.wantsPlayback || ui.video.paused) {
+    return;
+  }
+
+  const bufferedEnd =
+    getAudienceVideoBufferedEnd();
+
+  if (
+    Number.isFinite(bufferedEnd) &&
+    bufferedEnd > 0 &&
+    bufferedEnd - ui.video.currentTime > 4
+  ) {
+    ui.video.currentTime = Math.max(
+      0,
+      bufferedEnd - 1
+    );
+  }
+}
+
+function reconnectAudienceStream(reason = "stale") {
+  if (!state.sessionId) {
+    return;
+  }
+
+  const now = Date.now();
+
+  if (
+    state.lastStreamReconnectAt &&
+    now - state.lastStreamReconnectAt < 5000
+  ) {
+    return;
+  }
+
+  state.lastStreamReconnectAt = now;
+  state.streamReconnectCount += 1;
+  connectStream({
+    reconnectReason: reason,
+  });
+}
+
+function recoverAudienceStreamIfStale(status) {
+  if (
+    !state.streamConnected ||
+    !status?.active ||
+    !state.lastChunkAt
+  ) {
+    return;
+  }
+
+  seekAudienceVideoToLiveEdge();
+
+  if (!state.wantsPlayback && ui.video.paused) {
+    return;
+  }
+
+  const now = Date.now();
+  const serverRecentlySent =
+    now - state.lastChunkAt < 15000;
+  const videoHasNoProgress =
+    state.lastVideoProgressAt
+      ? now - state.lastVideoProgressAt > 9000
+      : now - state.lastStreamReconnectAt > 9000;
+  const videoHasNoSource =
+    ui.video.networkState ===
+      HTMLMediaElement.NETWORK_NO_SOURCE ||
+    ui.video.readyState ===
+      HTMLMediaElement.HAVE_NOTHING;
+
+  if (
+    serverRecentlySent &&
+    (videoHasNoSource || videoHasNoProgress)
+  ) {
+    reconnectAudienceStream(
+      videoHasNoSource ? "no-source" : "stale"
+    );
+  }
 }
 
 function getAudienceDisplayName() {
@@ -599,16 +699,38 @@ function startInteractivePolling() {
   );
 }
 
-function connectStream() {
+function connectStream({
+  reconnectReason = "",
+} = {}) {
   if (!state.sessionId) {
     return;
   }
 
+  const shouldResume =
+    state.wantsPlayback &&
+    state.streamConnected;
+
   state.streamUrl = buildAudienceUrl("/api/audience/stream");
+  ui.video.pause();
+  ui.video.removeAttribute("src");
+  ui.video.load();
   ui.video.src = state.streamUrl;
   state.streamConnected = true;
+  state.lastStreamReconnectAt = Date.now();
+  state.lastVideoProgressAt = 0;
+  state.lastVideoTime = 0;
   ui.empty.classList.add("hidden");
   ui.playButton.disabled = false;
+
+  if (reconnectReason) {
+    setMessage("Reconnected to the live class view.");
+  }
+
+  if (shouldResume) {
+    ui.video.play().catch(() => {
+      setMessage("Press Play Live to resume the class view.");
+    });
+  }
 }
 
 async function refreshStatus() {
@@ -638,6 +760,8 @@ async function refreshStatus() {
       ui.playButton.disabled = true;
       state.streamConnected = false;
       state.lastStartedAt = 0;
+      state.lastChunkAt = 0;
+      state.lastVideoProgressAt = 0;
       ui.video.removeAttribute("src");
       ui.video.load();
       setMessage("Waiting for the teacher to start the audience broadcast.");
@@ -649,6 +773,8 @@ async function refreshStatus() {
     setStatus("Live", true);
     setChatStatus("Open");
     ui.sendButton.disabled = false;
+    state.lastChunkAt =
+      Number(status.lastChunkAt) || 0;
     setMessage(
       status.viewerCount === 1
         ? "1 viewer connected."
@@ -661,6 +787,8 @@ async function refreshStatus() {
     ) {
       state.lastStartedAt = status.startedAt;
       connectStream();
+    } else {
+      recoverAudienceStreamIfStale(status);
     }
   } catch {
     setStatus("Offline");
@@ -702,6 +830,8 @@ ui.sessionInput.addEventListener("keydown", (event) => {
 });
 
 ui.playButton.addEventListener("click", () => {
+  state.wantsPlayback = true;
+
   if (!state.streamConnected) {
     connectStream();
   }
@@ -827,7 +957,46 @@ ui.messageForm.addEventListener("submit", async (event) => {
 });
 
 ui.video.addEventListener("playing", () => {
+  state.wantsPlayback = true;
+  state.lastVideoProgressAt = Date.now();
+  state.lastVideoTime =
+    Number(ui.video.currentTime) || 0;
   ui.empty.classList.add("hidden");
+});
+
+ui.video.addEventListener("timeupdate", () => {
+  const currentTime =
+    Number(ui.video.currentTime) || 0;
+
+  if (
+    Math.abs(currentTime - state.lastVideoTime) >=
+    0.1
+  ) {
+    state.lastVideoTime = currentTime;
+    state.lastVideoProgressAt = Date.now();
+  }
+
+  seekAudienceVideoToLiveEdge();
+});
+
+ui.video.addEventListener("stalled", () => {
+  window.setTimeout(
+    () =>
+      recoverAudienceStreamIfStale({
+        active: true,
+      }),
+    1200
+  );
+});
+
+ui.video.addEventListener("waiting", () => {
+  window.setTimeout(
+    () =>
+      recoverAudienceStreamIfStale({
+        active: true,
+      }),
+    1600
+  );
 });
 
 ui.video.addEventListener("ended", () => {
