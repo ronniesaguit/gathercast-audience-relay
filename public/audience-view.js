@@ -429,6 +429,11 @@ async function refreshAudienceFrame() {
     );
 
     if (response.status === 204) {
+      if (!state.lastFrameSequence && ui.empty) {
+        ui.empty.classList.remove("hidden");
+        ui.empty.textContent =
+          "Waiting for the teacher's Stage frame...";
+      }
       return;
     }
 
