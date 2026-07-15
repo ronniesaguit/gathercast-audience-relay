@@ -39,8 +39,11 @@ const state = {
   streamReconnectCount: 0,
   frameTimer: 0,
   frameObjectUrl: "",
+  frameLoadToken: 0,
   lastFrameSequence: 0,
   lastFrameAt: 0,
+  lastRelayFrameSequence: 0,
+  lastFrameError: "",
   statusTimer: 0,
   messagesTimer: 0,
   messages: [],
@@ -396,8 +399,10 @@ function clearAudienceFrame() {
   }
 
   state.frameObjectUrl = "";
+  state.frameLoadToken += 1;
   state.lastFrameSequence = 0;
   state.lastFrameAt = 0;
+  state.lastFrameError = "";
 
   if (ui.frame) {
     ui.frame.removeAttribute("src");
@@ -412,6 +417,57 @@ function clearAudienceFrame() {
       ? "Receiving the teacher's Stage..."
       : "Waiting for the teacher to start the audience broadcast.";
   }
+}
+
+function showAudienceFrameMessage(message) {
+  if (!ui.empty || state.lastFrameSequence) {
+    return;
+  }
+
+  ui.empty.classList.remove("hidden");
+  ui.empty.textContent = message;
+}
+
+function loadAudienceFrameImage(objectUrl) {
+  return new Promise((resolve, reject) => {
+    if (!ui.frame) {
+      reject(new Error("The Audience frame element is missing."));
+      return;
+    }
+
+    const token =
+      state.frameLoadToken + 1;
+    state.frameLoadToken = token;
+
+    const cleanup = () => {
+      ui.frame.onload = null;
+      ui.frame.onerror = null;
+    };
+
+    ui.frame.onload = () => {
+      if (token !== state.frameLoadToken) {
+        cleanup();
+        reject(new Error("The Audience frame was replaced before it loaded."));
+        return;
+      }
+
+      cleanup();
+      resolve();
+    };
+
+    ui.frame.onerror = () => {
+      if (token !== state.frameLoadToken) {
+        cleanup();
+        reject(new Error("The Audience frame was replaced before it loaded."));
+        return;
+      }
+
+      cleanup();
+      reject(new Error("The browser could not decode the teacher's Stage frame."));
+    };
+
+    ui.frame.src = objectUrl;
+  });
 }
 
 async function refreshAudienceFrame() {
@@ -429,15 +485,18 @@ async function refreshAudienceFrame() {
     );
 
     if (response.status === 204) {
-      if (!state.lastFrameSequence && ui.empty) {
-        ui.empty.classList.remove("hidden");
-        ui.empty.textContent =
-          "Waiting for the teacher's Stage frame...";
-      }
+      showAudienceFrameMessage(
+        state.lastRelayFrameSequence
+          ? `Waiting for Stage frame ${state.lastRelayFrameSequence} to download...`
+          : "Waiting for the teacher's Stage frame..."
+      );
       return;
     }
 
     if (!response.ok) {
+      showAudienceFrameMessage(
+        `Stage frame request failed (HTTP ${response.status}).`
+      );
       return;
     }
 
@@ -461,11 +520,9 @@ async function refreshAudienceFrame() {
       if (state.lastFrameSequence) {
         clearAudienceFrame();
       }
-      if (!state.lastFrameSequence && ui.empty) {
-        ui.empty.classList.remove("hidden");
-        ui.empty.textContent =
-          "Waiting for the teacher's Stage-only frame...";
-      }
+      showAudienceFrameMessage(
+        `Waiting for the teacher's Stage-only frame. Received '${frameSource}' instead.`
+      );
       return;
     }
 
@@ -479,6 +536,9 @@ async function refreshAudienceFrame() {
     const blob = await response.blob();
 
     if (!blob || blob.size <= 0) {
+      showAudienceFrameMessage(
+        "The teacher's Stage frame was empty."
+      );
       return;
     }
 
@@ -486,6 +546,17 @@ async function refreshAudienceFrame() {
       URL.createObjectURL(blob);
     const previousUrl =
       state.frameObjectUrl;
+
+    try {
+      await loadAudienceFrameImage(objectUrl);
+    } catch (error) {
+      URL.revokeObjectURL(objectUrl);
+      state.lastFrameError =
+        error?.message ||
+        "The teacher's Stage frame could not be displayed.";
+      showAudienceFrameMessage(state.lastFrameError);
+      return;
+    }
 
     state.frameObjectUrl = objectUrl;
     state.lastFrameSequence = sequence;
@@ -497,7 +568,6 @@ async function refreshAudienceFrame() {
       ) || Date.now();
 
     if (ui.frame) {
-      ui.frame.src = objectUrl;
       ui.frame.hidden = false;
       ui.empty.classList.add("hidden");
       ui.stageShell?.classList.add("has-live-frame");
@@ -509,7 +579,11 @@ async function refreshAudienceFrame() {
         1000
       );
     }
-  } catch {
+  } catch (error) {
+    showAudienceFrameMessage(
+      error?.message ||
+        "The Audience page could not receive the teacher's Stage frame."
+    );
     // The video stream remains available if frame polling misses a beat.
   }
 }
@@ -1032,6 +1106,8 @@ async function refreshStatus() {
     ui.sendButton.disabled = false;
     state.lastChunkAt =
       Number(status.lastChunkAt) || 0;
+    state.lastRelayFrameSequence =
+      Number(status.frameSequence) || 0;
     setMessage(
       status.viewerCount === 1
         ? "1 viewer connected."
