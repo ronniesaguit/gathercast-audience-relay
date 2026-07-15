@@ -3,11 +3,17 @@ const ui = {
   joinPanel: document.getElementById("joinPanel"),
   sessionInput: document.getElementById("sessionInput"),
   joinButton: document.getElementById("joinButton"),
+  stageShell: document.getElementById("audienceStageShell"),
   video: document.getElementById("audienceVideo"),
   frame: document.getElementById("audienceFrame"),
   empty: document.getElementById("audienceEmpty"),
+  laminate: document.getElementById("audienceLaminate"),
   playButton: document.getElementById("playButton"),
   meta: document.getElementById("audienceMeta"),
+  zoomOutButton: document.getElementById("audienceZoomOutButton"),
+  zoomInButton: document.getElementById("audienceZoomInButton"),
+  zoomResetButton: document.getElementById("audienceZoomResetButton"),
+  zoomValue: document.getElementById("audienceZoomValue"),
   chatStatus: document.getElementById("audienceChatStatus"),
   messageList: document.getElementById("audienceMessageList"),
   messageForm: document.getElementById("audienceMessageForm"),
@@ -47,7 +53,17 @@ const state = {
   interactiveStream: null,
   interactiveStarting: false,
   interactiveIceServers: [],
+  audienceZoom: 1,
 };
+
+const AUDIENCE_ZOOM_STORAGE_KEY =
+  "gathercastAudienceViewZoom";
+const AUDIENCE_ZOOM_STEP = 0.1;
+const AUDIENCE_ZOOM_MIN = 0.75;
+const AUDIENCE_ZOOM_MAX = 1;
+const AUDIENCE_LAMINATE_WIDTH = 1180;
+const AUDIENCE_LAMINATE_HEIGHT = 900;
+const AUDIENCE_LAMINATE_MARGIN = 16;
 
 function getSessionFromUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -112,6 +128,100 @@ function setInteractiveStatus(text) {
   if (ui.interactiveStatus) {
     ui.interactiveStatus.textContent = text;
   }
+}
+
+function normalizeAudienceZoom(value) {
+  const zoom = Number(value);
+
+  if (!Number.isFinite(zoom)) {
+    return 1;
+  }
+
+  return Math.max(
+    AUDIENCE_ZOOM_MIN,
+    Math.min(AUDIENCE_ZOOM_MAX, zoom)
+  );
+}
+
+function getAudienceFitScale() {
+  const viewportWidth =
+    Math.max(
+      1,
+      window.innerWidth ||
+        document.documentElement?.clientWidth ||
+        AUDIENCE_LAMINATE_WIDTH
+    );
+  const viewportHeight =
+    Math.max(
+      1,
+      window.innerHeight ||
+        document.documentElement?.clientHeight ||
+        AUDIENCE_LAMINATE_HEIGHT
+    );
+  const fitWidth =
+    Math.max(
+      0.1,
+      (viewportWidth - AUDIENCE_LAMINATE_MARGIN) /
+        AUDIENCE_LAMINATE_WIDTH
+    );
+  const fitHeight =
+    Math.max(
+      0.1,
+      (viewportHeight - AUDIENCE_LAMINATE_MARGIN) /
+        AUDIENCE_LAMINATE_HEIGHT
+    );
+
+  return Math.min(fitWidth, fitHeight);
+}
+
+function applyAudienceFitScale() {
+  const fitScale =
+    getAudienceFitScale();
+  const requestedScale =
+    fitScale * state.audienceZoom;
+  const finalScale =
+    Math.max(
+      0.1,
+      Math.min(requestedScale, fitScale)
+    );
+
+  document.documentElement.style.setProperty(
+    "--audience-fit-scale",
+    String(finalScale)
+  );
+  document.documentElement.style.setProperty(
+    "--audience-ui-scale",
+    String(state.audienceZoom)
+  );
+
+  if (ui.zoomValue) {
+    ui.zoomValue.textContent =
+      `${Math.round(state.audienceZoom * 100)}%`;
+  }
+}
+
+function setAudienceZoom(value, { persist = true } = {}) {
+  const zoom =
+    Math.round(normalizeAudienceZoom(value) * 100) / 100;
+
+  state.audienceZoom = zoom;
+  applyAudienceFitScale();
+
+  if (persist) {
+    window.localStorage?.setItem(
+      AUDIENCE_ZOOM_STORAGE_KEY,
+      String(zoom)
+    );
+  }
+}
+
+function loadAudienceZoom() {
+  setAudienceZoom(
+    window.localStorage?.getItem(AUDIENCE_ZOOM_STORAGE_KEY) || 1,
+    {
+      persist: false,
+    }
+  );
 }
 
 function updateJoinPanel() {
@@ -293,6 +403,15 @@ function clearAudienceFrame() {
     ui.frame.removeAttribute("src");
     ui.frame.hidden = true;
   }
+
+  ui.stageShell?.classList.remove("has-live-frame");
+
+  if (ui.empty) {
+    ui.empty.classList.remove("hidden");
+    ui.empty.textContent = state.sessionId
+      ? "Receiving the teacher's Stage..."
+      : "Waiting for the teacher to start the audience broadcast.";
+  }
 }
 
 async function refreshAudienceFrame() {
@@ -322,6 +441,28 @@ async function refreshAudienceFrame() {
         "X-GatherCast-Frame-Sequence"
       )
     ) || 0;
+    const frameSource = String(
+      response.headers.get(
+        "X-GatherCast-Frame-Source"
+      ) || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    if (
+      frameSource &&
+      frameSource !== "stage-rect"
+    ) {
+      if (state.lastFrameSequence) {
+        clearAudienceFrame();
+      }
+      if (!state.lastFrameSequence && ui.empty) {
+        ui.empty.classList.remove("hidden");
+        ui.empty.textContent =
+          "Waiting for the teacher's Stage-only frame...";
+      }
+      return;
+    }
 
     if (
       sequence &&
@@ -354,6 +495,7 @@ async function refreshAudienceFrame() {
       ui.frame.src = objectUrl;
       ui.frame.hidden = false;
       ui.empty.classList.add("hidden");
+      ui.stageShell?.classList.add("has-live-frame");
     }
 
     if (previousUrl) {
@@ -824,7 +966,11 @@ function connectStream({
   state.lastStreamReconnectAt = Date.now();
   state.lastVideoProgressAt = 0;
   state.lastVideoTime = 0;
-  ui.empty.classList.add("hidden");
+  if (!state.lastFrameSequence && ui.empty) {
+    ui.empty.classList.remove("hidden");
+    ui.empty.textContent =
+      "Receiving the teacher's Stage...";
+  }
   ui.playButton.disabled = false;
 
   if (reconnectReason) {
@@ -938,14 +1084,34 @@ ui.sessionInput.addEventListener("keydown", (event) => {
 
 ui.playButton.addEventListener("click", () => {
   state.wantsPlayback = true;
+  ui.playButton.textContent =
+    "Live audio";
 
   if (!state.streamConnected) {
     connectStream();
   }
 
   ui.video.play().catch(() => {
-    setMessage("Press play in the video controls to start audio.");
+    setMessage(
+      "Live picture continues here. Click Play Live again if audio is blocked."
+    );
   });
+});
+
+ui.zoomOutButton?.addEventListener("click", () => {
+  setAudienceZoom(state.audienceZoom - AUDIENCE_ZOOM_STEP);
+});
+
+ui.zoomInButton?.addEventListener("click", () => {
+  setAudienceZoom(state.audienceZoom + AUDIENCE_ZOOM_STEP);
+});
+
+ui.zoomResetButton?.addEventListener("click", () => {
+  setAudienceZoom(1);
+});
+
+window.addEventListener("resize", () => {
+  applyAudienceFitScale();
 });
 
 ui.raiseHandButton?.addEventListener("click", async () => {
@@ -1121,6 +1287,7 @@ ui.video.addEventListener("error", () => {
 ui.nameInput.value =
   window.localStorage?.getItem("gathercastAudienceName") || "";
 state.participantId = getOrCreateParticipantId();
+loadAudienceZoom();
 
 window.addEventListener("beforeunload", () => {
   window.clearInterval(state.frameTimer);

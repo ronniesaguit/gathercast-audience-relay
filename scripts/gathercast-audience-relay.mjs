@@ -860,6 +860,12 @@ function normalizeAudienceFrameMimeType(value = '') {
     : '';
 }
 
+function normalizeAudienceFrameSource(value = '') {
+  const source = String(value || '').trim().toLowerCase();
+
+  return source === 'stage-rect' ? 'stage-rect' : 'unknown';
+}
+
 function startAudienceSession(req, {
   title = '',
   mimeType = '',
@@ -996,6 +1002,14 @@ async function receiveAudienceFrame(req, res, requestUrl) {
     req,
     RELAY_MAX_FRAME_BYTES
   );
+  const frameSource = normalizeAudienceFrameSource(
+    req.headers['x-gathercast-frame-source']
+  );
+  const frameElement = String(
+    req.headers['x-gathercast-frame-element'] || ''
+  )
+    .trim()
+    .slice(0, 80);
 
   if (body.length === 0) {
     sendJson(res, 200, {
@@ -1012,6 +1026,8 @@ async function receiveAudienceFrame(req, res, requestUrl) {
     sequence: relayState.frameSequence,
     capturedAt: relayState.lastFrameAt,
     mimeType,
+    source: frameSource,
+    element: frameElement,
     body,
   };
 
@@ -1053,6 +1069,8 @@ function serveAudienceFrame(req, res, requestUrl) {
     'X-Content-Type-Options': 'nosniff',
     'X-GatherCast-Frame-Sequence': String(frame.sequence),
     'X-GatherCast-Frame-Captured-At': String(frame.capturedAt),
+    'X-GatherCast-Frame-Source': frame.source || 'unknown',
+    'X-GatherCast-Frame-Element': frame.element || '',
   });
   res.end(frame.body);
 }

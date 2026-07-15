@@ -8,129 +8,143 @@
 </head>
 <body>
   <main class="audience-shell">
-    <header class="audience-header">
-      <div>
-        <div class="eyebrow">GatherCast Studio</div>
-        <h1>Live Class View</h1>
-      </div>
-      <span id="audienceStatus" class="audience-status">Waiting</span>
-    </header>
-
-    <section id="joinPanel" class="join-panel" hidden>
-      <label>
-        <span>Session link or code</span>
-        <input
-          id="sessionInput"
-          type="text"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="Paste the teacher's watch link"
-        >
-      </label>
-      <button id="joinButton" type="button">Join</button>
-    </section>
-
-    <section class="stage-shell">
-      <video
-        id="audienceVideo"
-        class="audience-video"
-        playsinline
-        controls
-      ></video>
-      <img
-        id="audienceFrame"
-        class="audience-frame"
-        alt=""
-        hidden
-      >
-      <div id="audienceEmpty" class="audience-empty">
-        Waiting for the teacher to start the audience broadcast.
-      </div>
-    </section>
-
-    <div class="audience-actions">
-      <button id="playButton" type="button" disabled>Play Live</button>
-      <span id="audienceMeta">Open the watch link from the teacher.</span>
-    </div>
-
-    <section
-      class="audience-interactive"
-      aria-labelledby="audienceInteractiveTitle"
+    <div
+      id="audienceLaminate"
+      class="audience-laminate"
     >
-      <div class="audience-interactive-header">
+      <header class="audience-header">
         <div>
-          <div class="eyebrow">Live Interaction</div>
-          <h2 id="audienceInteractiveTitle">Talk with the teacher</h2>
+          <div class="eyebrow">GatherCast Studio</div>
+          <h1>Live Class View</h1>
         </div>
-        <span id="audienceInteractiveStatus">Waiting</span>
-      </div>
-
-      <div class="audience-interactive-actions">
-        <button
-          id="audienceRaiseHandButton"
-          type="button"
-          disabled
-        >
-          Raise Hand
-        </button>
-        <button
-          id="audienceLeaveGuestButton"
-          type="button"
-          disabled
-        >
-          Leave
-        </button>
-      </div>
-
-      <video
-        id="audienceGuestPreview"
-        class="audience-guest-preview"
-        autoplay
-        muted
-        playsinline
-        hidden
-      ></video>
-    </section>
-
-    <section class="audience-chat" aria-labelledby="audienceChatTitle">
-      <div class="audience-chat-header">
-        <div>
-          <div class="eyebrow">Audience Messages</div>
-          <h2 id="audienceChatTitle">Questions and replies</h2>
+        <div class="audience-header-actions">
+          <span id="audienceStatus" class="audience-status">Waiting</span>
         </div>
-        <span id="audienceChatStatus">Waiting</span>
+      </header>
+
+      <section id="joinPanel" class="join-panel" hidden>
+        <label>
+          <span>Session link or code</span>
+          <input
+            id="sessionInput"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste the teacher's watch link"
+          >
+        </label>
+        <button id="joinButton" type="button">Join</button>
+      </section>
+
+      <section id="audienceStageShell" class="stage-shell">
+        <video
+          id="audienceVideo"
+          class="audience-video"
+          playsinline
+        ></video>
+        <img
+          id="audienceFrame"
+          class="audience-frame"
+          alt=""
+          hidden
+        >
+        <div id="audienceEmpty" class="audience-empty">
+          Waiting for the teacher to start the audience broadcast.
+        </div>
+      </section>
+
+      <div class="audience-actions">
+        <button id="playButton" type="button" disabled>Play Live</button>
+        <span id="audienceMeta">Open the watch link from the teacher.</span>
+        <div class="audience-zoom-controls" aria-label="Audience view zoom">
+          <button id="audienceZoomOutButton" type="button">-</button>
+          <span id="audienceZoomValue">100%</span>
+          <button id="audienceZoomInButton" type="button">+</button>
+          <button id="audienceZoomResetButton" type="button">Reset</button>
+        </div>
       </div>
 
-      <div
-        id="audienceMessageList"
-        class="audience-message-list"
-        aria-live="polite"
-      >
-        <p class="audience-message-empty">
-          Messages will appear here when the broadcast starts.
-        </p>
-      </div>
+      <div class="audience-lower-panels">
+        <section
+          class="audience-interactive"
+          aria-labelledby="audienceInteractiveTitle"
+        >
+          <div class="audience-interactive-header">
+            <div>
+              <div class="eyebrow">Live Interaction</div>
+              <h2 id="audienceInteractiveTitle">Talk with the teacher</h2>
+            </div>
+            <span id="audienceInteractiveStatus">Waiting</span>
+          </div>
 
-      <form id="audienceMessageForm" class="audience-message-form">
-        <input
-          id="audienceNameInput"
-          type="text"
-          autocomplete="name"
-          maxlength="60"
-          placeholder="Your name"
-        >
-        <input
-          id="audienceMessageInput"
-          type="text"
-          autocomplete="off"
-          maxlength="500"
-          placeholder="Ask a question or send a comment"
-        >
-        <button id="audienceSendButton" type="submit" disabled>
-          Send
-        </button>
-      </form>
-    </section>
+          <div class="audience-interactive-actions">
+            <button
+              id="audienceRaiseHandButton"
+              type="button"
+              disabled
+            >
+              Raise Hand
+            </button>
+            <button
+              id="audienceLeaveGuestButton"
+              type="button"
+              disabled
+            >
+              Leave
+            </button>
+          </div>
+
+          <video
+            id="audienceGuestPreview"
+            class="audience-guest-preview"
+            autoplay
+            muted
+            playsinline
+            hidden
+          ></video>
+        </section>
+
+        <section class="audience-chat" aria-labelledby="audienceChatTitle">
+          <div class="audience-chat-header">
+            <div>
+              <div class="eyebrow">Audience Messages</div>
+              <h2 id="audienceChatTitle">Questions and replies</h2>
+            </div>
+            <span id="audienceChatStatus">Waiting</span>
+          </div>
+
+          <div
+            id="audienceMessageList"
+            class="audience-message-list"
+            aria-live="polite"
+          >
+            <p class="audience-message-empty">
+              Messages will appear here when the broadcast starts.
+            </p>
+          </div>
+
+          <form id="audienceMessageForm" class="audience-message-form">
+            <input
+              id="audienceNameInput"
+              type="text"
+              autocomplete="name"
+              maxlength="60"
+              placeholder="Your name"
+            >
+            <input
+              id="audienceMessageInput"
+              type="text"
+              autocomplete="off"
+              maxlength="500"
+              placeholder="Ask a question or send a comment"
+            >
+            <button id="audienceSendButton" type="submit" disabled>
+              Send
+            </button>
+          </form>
+        </section>
+      </div>
+    </div>
   </main>
 
   <script type="module" src="/audience-view.js"></script>
