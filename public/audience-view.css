@@ -46,12 +46,13 @@ input {
   min-height: 0;
   margin: 0;
   padding: 0;
-  display: grid;
-  place-items: center;
   overflow: hidden;
 }
 
 .audience-laminate {
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: 1180px;
   height: 900px;
   min-height: 0;
@@ -70,7 +71,9 @@ input {
   background:
     linear-gradient(180deg, rgba(22, 27, 34, 0.96), rgba(13, 17, 23, 0.98));
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.48);
-  transform: scale(var(--audience-fit-scale));
+  transform:
+    translate(-50%, -50%)
+    scale(var(--audience-fit-scale));
   transform-origin: center;
 }
 
