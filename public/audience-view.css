@@ -471,12 +471,23 @@ button:disabled {
   }
 
   .audience-laminate {
+    position: fixed;
+    inset: 0;
+    left: auto;
+    top: auto;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    padding: 8px;
     grid-template-rows:
       auto
       auto
-      minmax(0, 1fr)
+      minmax(190px, 1fr)
       auto
-      minmax(0, auto);
+      minmax(150px, 0.68fr);
+    gap: 7px;
+    border-radius: 0;
+    transform: none;
   }
 
   .audience-header,
@@ -487,6 +498,14 @@ button:disabled {
     flex-direction: column;
   }
 
+  .audience-header {
+    gap: 6px;
+  }
+
+  h1 {
+    font-size: 28px;
+  }
+
   .join-panel,
   .audience-lower-panels,
   .audience-message-form {
@@ -495,6 +514,8 @@ button:disabled {
 
   .stage-shell {
     width: 100%;
+    min-height: 190px;
+    align-self: stretch;
   }
 
   #audienceMeta {
