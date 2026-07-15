@@ -30,6 +30,7 @@ const RELAY_MAX_MESSAGES = Number(
 );
 const RELAY_MAX_MESSAGE_NAME_CHARS = 60;
 const RELAY_MAX_MESSAGE_TEXT_CHARS = 500;
+const RELAY_PARTICIPANT_TTL_MS = 45 * 1000;
 const RELAY_MAX_INTERACTIVE_GUESTS = 4;
 const RELAY_MAX_INTERACTIVE_REQUESTS = 80;
 const RELAY_MAX_INTERACTIVE_SIGNALS = 400;
@@ -62,6 +63,7 @@ const relayState = {
   lastFrameAt: 0,
   bytesReceived: 0,
   viewers: new Set(),
+  participants: new Map(),
   messages: [],
   nextMessageId: 1,
   interactiveRequests: [],
@@ -254,6 +256,9 @@ function requireHostKey(req) {
 
 function getAudienceStatusPayload(sessionId = '') {
   const sessionMatches = hasActiveAudienceSession(sessionId);
+  const participants = sessionMatches
+    ? getAudienceParticipantList()
+    : [];
 
   return {
     active: sessionMatches,
@@ -265,7 +270,10 @@ function getAudienceStatusPayload(sessionId = '') {
     lastFrameAt: sessionMatches ? relayState.lastFrameAt : 0,
     frameSequence: sessionMatches ? relayState.frameSequence : 0,
     bytesReceived: sessionMatches ? relayState.bytesReceived : 0,
-    viewerCount: sessionMatches ? relayState.viewers.size : 0,
+    viewerCount: sessionMatches
+      ? Math.max(relayState.viewers.size, participants.length)
+      : 0,
+    participants,
     relay: true,
   };
 }
@@ -276,6 +284,80 @@ function normalizeAudienceMessageText(value, maxLength) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+}
+
+function getAudienceParticipantShortId(participantId = '') {
+  return String(participantId || '')
+    .slice(-6)
+    .toUpperCase();
+}
+
+function normalizeAudiencePresenceName(value, participantId = '') {
+  return (
+    normalizeAudienceMessageText(
+      value,
+      RELAY_MAX_MESSAGE_NAME_CHARS
+    ) ||
+    `Audience ${getAudienceParticipantShortId(participantId)}`
+  );
+}
+
+function pruneAudienceParticipants(now = Date.now()) {
+  for (const [participantId, participant] of relayState.participants) {
+    if (
+      now - (Number(participant.lastSeenAt) || 0) >
+      RELAY_PARTICIPANT_TTL_MS
+    ) {
+      relayState.participants.delete(participantId);
+    }
+  }
+}
+
+function getAudienceParticipantList() {
+  pruneAudienceParticipants();
+
+  return [...relayState.participants.values()]
+    .sort((left, right) =>
+      (Number(left.joinedAt) || 0) -
+      (Number(right.joinedAt) || 0)
+    )
+    .map((participant) => ({
+      participantId: participant.participantId,
+      name: participant.name,
+      joinedAt: Number(participant.joinedAt) || 0,
+      lastSeenAt: Number(participant.lastSeenAt) || 0,
+    }));
+}
+
+function upsertAudienceParticipant({
+  participantId = '',
+  name = '',
+} = {}) {
+  const safeParticipantId =
+    normalizeAudienceParticipantId(participantId);
+  const now = Date.now();
+  const existing =
+    relayState.participants.get(safeParticipantId);
+  const participant = {
+    participantId: safeParticipantId,
+    name: normalizeAudiencePresenceName(name, safeParticipantId),
+    joinedAt: existing?.joinedAt || now,
+    lastSeenAt: now,
+  };
+
+  relayState.participants.set(
+    safeParticipantId,
+    participant
+  );
+
+  return participant;
+}
+
+function removeAudienceParticipant(participantId = '') {
+  const safeParticipantId =
+    normalizeAudienceParticipantId(participantId);
+
+  relayState.participants.delete(safeParticipantId);
 }
 
 function createHttpError(message, statusCode = 400) {
@@ -890,6 +972,7 @@ function startAudienceSession(req, {
   relayState.latestFrame = null;
   relayState.lastFrameAt = 0;
   relayState.bytesReceived = 0;
+  relayState.participants.clear();
   relayState.messages = [];
   relayState.nextMessageId = 1;
   resetAudienceInteractiveState();
@@ -914,6 +997,12 @@ async function receiveAudienceMessage(req, res, requestUrl) {
   }
 
   const body = await readJsonBody(req);
+  if (body.participantId) {
+    upsertAudienceParticipant({
+      participantId: body.participantId,
+      name: body.name,
+    });
+  }
   const message = appendAudienceMessage({
     role: 'audience',
     name: body.name,
@@ -924,6 +1013,50 @@ async function receiveAudienceMessage(req, res, requestUrl) {
     accepted: true,
     message,
     latestMessageId: message.id,
+    relay: true,
+  });
+}
+
+async function receiveAudiencePresence(req, res, requestUrl) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+
+  if (!hasActiveAudienceSession(sessionId)) {
+    sendJson(res, 409, {
+      error: 'The audience relay broadcast is not live.',
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const participant = upsertAudienceParticipant({
+    participantId: body.participantId,
+    name: body.name,
+  });
+  const participants = getAudienceParticipantList();
+
+  sendJson(res, 200, {
+    accepted: true,
+    participant,
+    participants,
+    viewerCount: Math.max(
+      relayState.viewers.size,
+      participants.length
+    ),
+    relay: true,
+  });
+}
+
+async function receiveAudiencePresenceLeave(req, res, requestUrl) {
+  const sessionId = getAudienceSessionFromUrl(requestUrl);
+  const sessionMatches = hasActiveAudienceSession(sessionId);
+  const body = await readJsonBody(req);
+
+  removeAudienceParticipant(body.participantId);
+
+  sendJson(res, 200, {
+    accepted: true,
+    active: sessionMatches,
+    participants: sessionMatches ? getAudienceParticipantList() : [],
     relay: true,
   });
 }
@@ -964,6 +1097,7 @@ function stopAudienceSession(sessionId) {
     relayState.endedAt = Date.now();
     closeAudienceViewers();
     resetAudienceInteractiveState();
+    relayState.participants.clear();
     relayState.latestFrame = null;
     relayState.lastFrameAt = 0;
   }
@@ -1349,6 +1483,30 @@ async function handleRoute(req, res) {
         requestUrl.searchParams.get('after')
       )
     );
+    return;
+  }
+
+  if (pathname === '/api/audience/presence') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveAudiencePresence(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/audience/presence/leave') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        error: 'Method not allowed',
+      });
+      return;
+    }
+
+    await receiveAudiencePresenceLeave(req, res, requestUrl);
     return;
   }
 

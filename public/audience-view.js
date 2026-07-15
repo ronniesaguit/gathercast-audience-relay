@@ -45,6 +45,7 @@ const state = {
   lastRelayFrameSequence: 0,
   lastFrameError: "",
   statusTimer: 0,
+  presenceTimer: 0,
   messagesTimer: 0,
   messages: [],
   latestMessageId: 0,
@@ -67,6 +68,7 @@ const AUDIENCE_ZOOM_MAX = 1;
 const AUDIENCE_LAMINATE_WIDTH = 1180;
 const AUDIENCE_LAMINATE_HEIGHT = 900;
 const AUDIENCE_LAMINATE_MARGIN = 16;
+const AUDIENCE_PRESENCE_INTERVAL_MS = 12000;
 
 function getSessionFromUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -235,6 +237,7 @@ function applySession(sessionId) {
   stopInteractiveGuest({
     notify: false,
   });
+  stopPresenceHeartbeat();
   clearAudienceFrame();
   state.sessionId = String(sessionId || "").trim();
   state.streamUrl = "";
@@ -384,6 +387,7 @@ function startMessagesPolling() {
     refreshMessages,
     1800
   );
+  startPresenceHeartbeat();
 }
 
 function buildAudienceUrl(pathname) {
@@ -391,6 +395,59 @@ function buildAudienceUrl(pathname) {
   url.searchParams.set("session", state.sessionId);
   url.searchParams.set("t", String(Date.now()));
   return url;
+}
+
+function getAudiencePresencePayload() {
+  return {
+    participantId: state.participantId,
+    name: ui.nameInput?.value?.trim() || "",
+  };
+}
+
+async function sendAudiencePresence({ leave = false } = {}) {
+  if (!state.sessionId || !state.participantId) {
+    return;
+  }
+
+  await fetch(
+    buildAudienceUrl(
+      leave
+        ? "/api/audience/presence/leave"
+        : "/api/audience/presence"
+    ),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(getAudiencePresencePayload()),
+      keepalive: leave,
+    }
+  );
+}
+
+function stopPresenceHeartbeat() {
+  if (state.presenceTimer) {
+    window.clearInterval(state.presenceTimer);
+    state.presenceTimer = 0;
+  }
+}
+
+function startPresenceHeartbeat() {
+  stopPresenceHeartbeat();
+
+  if (!state.sessionId || !state.participantId) {
+    return;
+  }
+
+  sendAudiencePresence().catch(() => {
+    // Status polling already tells the viewer if the session is gone.
+  });
+  state.presenceTimer = window.setInterval(() => {
+    sendAudiencePresence().catch(() => {
+      // Keep trying while the audience page is open.
+    });
+  }, AUDIENCE_PRESENCE_INTERVAL_MS);
 }
 
 function clearAudienceFrame() {
@@ -1289,6 +1346,7 @@ ui.messageForm.addEventListener("submit", async (event) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          participantId: state.participantId,
           name,
           text,
         }),
@@ -1308,6 +1366,21 @@ ui.messageForm.addEventListener("submit", async (event) => {
   } finally {
     window.setTimeout(refreshMessages, 300);
   }
+});
+
+ui.nameInput?.addEventListener("change", () => {
+  const name = ui.nameInput.value.trim();
+
+  if (name) {
+    window.localStorage?.setItem(
+      "gathercastAudienceName",
+      name
+    );
+  }
+
+  sendAudiencePresence().catch(() => {
+    // The next heartbeat will retry.
+  });
 });
 
 ui.video.addEventListener("playing", () => {
@@ -1371,6 +1444,12 @@ state.participantId = getOrCreateParticipantId();
 loadAudienceZoom();
 
 window.addEventListener("beforeunload", () => {
+  sendAudiencePresence({
+    leave: true,
+  }).catch(() => {
+    // The session will also prune stale participants.
+  });
+  stopPresenceHeartbeat();
   window.clearInterval(state.frameTimer);
   clearAudienceFrame();
   stopInteractiveGuest({
