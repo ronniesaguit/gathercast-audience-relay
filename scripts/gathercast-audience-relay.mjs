@@ -83,7 +83,7 @@ function createCorsHeaders() {
     'Access-Control-Allow-Origin': RELAY_ALLOWED_ORIGIN || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers':
-      'Content-Type, X-GatherCast-Host-Key',
+      'Content-Type, X-GatherCast-Host-Key, X-GatherCast-Frame-Source, X-GatherCast-Frame-Element',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };
